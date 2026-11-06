@@ -72,6 +72,14 @@ export class Viewport3D {
   private walkAnimPhase = 0;
   private dropShadowGroup: THREE.Group;
   private playtestHudEl!: HTMLDivElement;
+  private viewCubeCanvas!: HTMLCanvasElement;
+  private viewCubeCtx!: CanvasRenderingContext2D;
+  private hoveredCubeFace: string | null = null;
+  private viewCubeFaces2D: Array<{
+    id: string;
+    poly: Array<[number, number]>;
+    normal: Vec3;
+  }> = [];
   private lastFrameTime = performance.now();
   private enemySimTime = 0;
 
@@ -171,40 +179,115 @@ export class Viewport3D {
     this.animate();
   }
 
-  /** Unity-style upper-right Scene View Orientation Gizmo & Quick Camera Snapper */
+  /** Interactive 3D Orientation ViewCube (Top/Bottom/Left/Right/Front/Back + XYZ Axes) */
   private createUnitySceneGizmoOverlay(): void {
-    const gizmo = document.createElement('div');
-    gizmo.className = 'unity-scene-gizmo';
-    gizmo.innerHTML = `
-      <div class="gizmo-axes">
-        <button class="gizmo-axis axis-y" data-cam="top" title="Top View (+Y)">Y Top</button>
-        <button class="gizmo-axis axis-x" data-cam="right" title="Right View (+X)">X Right</button>
-        <button class="gizmo-axis axis-z" data-cam="front" title="Front View (+Z)">Z Front</button>
-        <button class="gizmo-axis axis-persp" data-cam="iso" title="Perspective Iso View">Persp</button>
-        <button class="gizmo-axis axis-focus" data-cam="focus" title="Frame Selected (F)">🎯 F</button>
+    const widget = document.createElement('div');
+    widget.className = 'viewcube-widget';
+    widget.innerHTML = `
+      <div class="viewcube-canvas-wrap" title="点击方块各个面快速切换镜头视角 (上/下/左/右/前/后) · 按住拖拽可环绕旋转">
+        <canvas class="viewcube-canvas" width="208" height="208"></canvas>
       </div>
-      <div class="gizmo-hint">RMB+WASD/EQ: 漫游飞行 | Alt+LMB: 环绕 | MMB: 平移 | F: 聚焦</div>
+      <div class="viewcube-subbar">
+        <button class="viewcube-mini-btn" data-vc-act="iso" title="重置为 45° 透视等轴视角">🧊 透视</button>
+        <button class="viewcube-mini-btn" data-vc-act="focus" title="聚焦选中物体 (快捷键 F)">🎯 聚焦</button>
+      </div>
     `;
-    this.container.appendChild(gizmo);
+    this.container.appendChild(widget);
 
-    gizmo.querySelectorAll<HTMLButtonElement>('[data-cam]').forEach((btn) => {
+    this.viewCubeCanvas = widget.querySelector('canvas')!;
+    this.viewCubeCtx = this.viewCubeCanvas.getContext('2d')!;
+    const dpr = 2;
+    this.viewCubeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const pointInPoly2D = (px: number, py: number, poly: Array<[number, number]>): boolean => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const [xi, yi] = poly[i];
+        const [xj, yj] = poly[j];
+        const intersect = yi > py !== yj > py && px < ((xj - xi) * (py - yi)) / (yj - yi + 1e-9) + xi;
+        if (intersect) inside = !inside;
+      }
+      return inside;
+    };
+
+    const getHitFace = (e: MouseEvent) => {
+      const rect = this.viewCubeCanvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      for (let i = this.viewCubeFaces2D.length - 1; i >= 0; i--) {
+        if (pointInPoly2D(mx, my, this.viewCubeFaces2D[i].poly)) {
+          return this.viewCubeFaces2D[i];
+        }
+      }
+      return null;
+    };
+
+    let vcDragStart: { x: number; y: number; moved: boolean } | null = null;
+
+    this.viewCubeCanvas.addEventListener('mousemove', (e) => {
+      if (vcDragStart) {
+        const dx = e.clientX - vcDragStart.x;
+        const dy = e.clientY - vcDragStart.y;
+        if (Math.hypot(dx, dy) > 3) vcDragStart.moved = true;
+        if (vcDragStart.moved) {
+          vcDragStart.x = e.clientX;
+          vcDragStart.y = e.clientY;
+          const offset = this.camera.position.clone().sub(this.orbit.target);
+          const sph = new THREE.Spherical().setFromVector3(offset);
+          sph.theta -= dx * 0.015;
+          sph.phi = Math.max(0.05, Math.min(Math.PI - 0.05, sph.phi - dy * 0.015));
+          offset.setFromSpherical(sph);
+          this.camera.position.copy(this.orbit.target).add(offset);
+          this.orbit.update();
+        }
+        return;
+      }
+      const hit = getHitFace(e);
+      this.hoveredCubeFace = hit ? hit.id : null;
+    });
+
+    this.viewCubeCanvas.addEventListener('mouseleave', () => {
+      this.hoveredCubeFace = null;
+    });
+
+    this.viewCubeCanvas.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      vcDragStart = { x: e.clientX, y: e.clientY, moved: false };
+      const upHandler = (upEv: MouseEvent) => {
+        window.removeEventListener('mouseup', upHandler);
+        const wasMoved = vcDragStart?.moved;
+        vcDragStart = null;
+        if (!wasMoved) {
+          const hit = getHitFace(upEv);
+          if (hit) {
+            const target = this.orbit.target.clone();
+            const dist = Math.max(18, this.camera.position.distanceTo(target));
+            const [nx, ny, nz] = hit.normal;
+            // Slight offset on X/Z when looking straight along Y to avoid gimbal lock in OrbitControls
+            const epsZ = Math.abs(ny) > 0.9 ? 0.01 : 0;
+            this.camera.position.set(
+              target.x + nx * dist,
+              target.y + ny * dist,
+              target.z + nz * dist + epsZ
+            );
+            this.orbit.update();
+          }
+        }
+      };
+      window.addEventListener('mouseup', upHandler);
+    });
+
+    widget.querySelectorAll<HTMLButtonElement>('[data-vc-act]').forEach((btn) => {
       btn.onclick = (e) => {
         e.stopPropagation();
-        const mode = btn.dataset.cam;
-        const target = this.orbit.target.clone();
-        if (mode === 'top') {
-          this.camera.position.set(target.x, target.y + 32, target.z + 0.01);
-        } else if (mode === 'right') {
-          this.camera.position.set(target.x + 28, target.y + 2, target.z);
-        } else if (mode === 'front') {
-          this.camera.position.set(target.x, target.y + 2, target.z + 28);
-        } else if (mode === 'iso') {
+        const act = btn.dataset.vcAct;
+        if (act === 'iso') {
+          const target = this.orbit.target.clone();
           this.camera.position.set(target.x + 18, target.y + 16, target.z + 24);
-        } else if (mode === 'focus') {
+          this.orbit.update();
+        } else if (act === 'focus') {
           this.frameSelected();
-          return;
         }
-        this.orbit.update();
       };
     });
 
@@ -223,6 +306,206 @@ export class Viewport3D {
     this.playtestHudEl = document.createElement('div');
     this.playtestHudEl.className = 'playtest-hud-bar';
     this.container.appendChild(this.playtestHudEl);
+  }
+
+  private renderViewCube(): void {
+    if (!this.viewCubeCtx) return;
+    const ctx = this.viewCubeCtx;
+    const cw = 104;
+    const ch = 104;
+    const cx = cw / 2;
+    const cy = ch / 2;
+    ctx.clearRect(0, 0, cw, ch);
+
+    const invQ = this.camera.quaternion.clone().invert();
+    const s = 22; // half-size of cube
+
+    const toCamSpace = (x: number, y: number, z: number): [number, number, number] => {
+      const v = new THREE.Vector3(x, y, z).applyQuaternion(invQ);
+      return [v.x, v.y, v.z];
+    };
+
+    const project = (vx: number, vy: number, vz: number): [number, number] => {
+      const pScale = 145 / Math.max(60, 145 - vz);
+      return [cx + vx * pScale, cy - vy * pScale];
+    };
+
+    const faces: Array<{
+      id: string;
+      label: string;
+      normal: Vec3;
+      color: string;
+      verts: Array<Vec3>;
+    }> = [
+      {
+        id: 'top',
+        label: '上 TOP',
+        normal: [0, 1, 0],
+        color: '#22c55e',
+        verts: [
+          [-s, s, -s],
+          [-s, s, s],
+          [s, s, s],
+          [s, s, -s],
+        ],
+      },
+      {
+        id: 'bottom',
+        label: '下 BTM',
+        normal: [0, -1, 0],
+        color: '#15803d',
+        verts: [
+          [-s, -s, s],
+          [-s, -s, -s],
+          [s, -s, -s],
+          [s, -s, s],
+        ],
+      },
+      {
+        id: 'right',
+        label: '右 +X',
+        normal: [1, 0, 0],
+        color: '#ef4444',
+        verts: [
+          [s, s, s],
+          [s, -s, s],
+          [s, -s, -s],
+          [s, s, -s],
+        ],
+      },
+      {
+        id: 'left',
+        label: '左 -X',
+        normal: [-1, 0, 0],
+        color: '#b91c1c',
+        verts: [
+          [-s, s, -s],
+          [-s, -s, -s],
+          [-s, -s, s],
+          [-s, s, s],
+        ],
+      },
+      {
+        id: 'front',
+        label: '前 +Z',
+        normal: [0, 0, 1],
+        color: '#38bdf8',
+        verts: [
+          [-s, s, s],
+          [-s, -s, s],
+          [s, -s, s],
+          [s, s, s],
+        ],
+      },
+      {
+        id: 'back',
+        label: '后 -Z',
+        normal: [0, 0, -1],
+        color: '#0369a1',
+        verts: [
+          [s, s, -s],
+          [s, -s, -s],
+          [-s, -s, -s],
+          [-s, s, -s],
+        ],
+      },
+    ];
+
+    // Draw compass ring around the cube base
+    ctx.save();
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.32)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 46, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+
+    // Draw XYZ axis lines from origin (-s,-s,-s)
+    const axes: Array<{ dir: Vec3; col: string; tag: string }> = [
+      { dir: [1, 0, 0], col: '#ef4444', tag: 'X' },
+      { dir: [0, 1, 0], col: '#22c55e', tag: 'Y' },
+      { dir: [0, 0, 1], col: '#38bdf8', tag: 'Z' },
+    ];
+    for (const ax of axes) {
+      const [ox, oy, oz] = toCamSpace(0, 0, 0);
+      const [ex, ey, ez] = toCamSpace(ax.dir[0] * 40, ax.dir[1] * 40, ax.dir[2] * 40);
+      const [sx0, sy0] = project(ox, oy, oz);
+      const [sx1, sy1] = project(ex, ey, ez);
+      ctx.save();
+      ctx.strokeStyle = ax.col;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(sx0, sy0);
+      ctx.lineTo(sx1, sy1);
+      ctx.stroke();
+
+      ctx.fillStyle = ax.col;
+      ctx.beginPath();
+      ctx.arc(sx1, sy1, 6.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#090d16';
+      ctx.font = 'bold 8.5px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ax.tag, sx1, sy1 + 0.5);
+      ctx.restore();
+    }
+
+    const projectedFaces = faces
+      .map((f) => {
+        const camVerts = f.verts.map((v) => toCamSpace(v[0], v[1], v[2]));
+        const camNorm = toCamSpace(f.normal[0], f.normal[1], f.normal[2]);
+        const avgZ = camVerts.reduce((acc, v) => acc + v[2], 0) / 4;
+        const poly = camVerts.map((v) => project(v[0], v[1], v[2]));
+        return {
+          ...f,
+          camNorm,
+          avgZ,
+          poly,
+        };
+      })
+      .filter((f) => f.camNorm[2] > 0.02)
+      .sort((a, b) => a.avgZ - b.avgZ);
+
+    this.viewCubeFaces2D = [];
+
+    for (const pf of projectedFaces) {
+      this.viewCubeFaces2D.push({
+        id: pf.id,
+        poly: pf.poly,
+        normal: pf.normal,
+      });
+
+      const isHover = this.hoveredCubeFace === pf.id;
+      ctx.save();
+      ctx.beginPath();
+      pf.poly.forEach(([px, py], idx) => {
+        if (idx === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      });
+      ctx.closePath();
+
+      ctx.fillStyle = isHover ? '#facc15' : pf.color;
+      ctx.globalAlpha = isHover ? 0.92 : 0.65 + Math.max(0, pf.camNorm[2]) * 0.25;
+      ctx.fill();
+
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = isHover ? '#ffffff' : 'rgba(248, 250, 252, 0.85)';
+      ctx.lineWidth = isHover ? 2.2 : 1.3;
+      ctx.stroke();
+
+      // Face center label
+      const fcx = pf.poly.reduce((acc, p) => acc + p[0], 0) / 4;
+      const fcy = pf.poly.reduce((acc, p) => acc + p[1], 0) / 4;
+      if (pf.camNorm[2] > 0.22) {
+        ctx.fillStyle = isHover ? '#090d16' : '#ffffff';
+        ctx.font = 'bold 9.5px Inter, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(pf.label, fcx, fcy);
+      }
+      ctx.restore();
+    }
   }
 
   public frameSelected(): void {
@@ -2066,6 +2349,7 @@ export class Viewport3D {
     this.renderer.setViewport(0, 0, cw, ch);
     this.renderer.setScissorTest(false);
     this.renderer.render(this.scene, this.camera);
+    this.renderViewCube();
 
     // Live Picture-in-Picture (PiP) Player Camera Preview in bottom-right of 3D Viewport
     const spawnPoi = this.store.doc.pois.find((p) => p.category === 'spawn_player');

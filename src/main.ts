@@ -66,6 +66,11 @@ let activeSidebarTab: 'inspector' | 'metrics' | 'audit' | 'ai' = 'inspector';
 let activeRoomCategoryFilter: RoomCategoryId | 'all' = 'all';
 let isThemeStudioOpen = false;
 let isNoteCardExpanded = false;
+let isLeftDockCollapsed = false;
+let isRightSidebarCollapsed = false;
+const collapsedDockSections = new Set<string>();
+const collapsedCards = new Set<string>();
+let isScrubbingNumber = false;
 let aiConsoleInput = JSON.stringify(
   {
     action: 'add_block',
@@ -147,6 +152,13 @@ app.innerHTML = `
       <!-- Right Inspector & Analytics Sidebar -->
       <aside class="right-sidebar" id="right-sidebar">
         <div class="sidebar-tabs" id="sidebar-tabs"></div>
+        <div class="sidebar-toolbar" id="sidebar-toolbar">
+          <span>📋 属性与分析面板 (点击卡片标题可折叠)</span>
+          <div style="display:flex;gap:4px;">
+            <button class="chip-toggle" id="btn-expand-all-cards" style="padding:1px 5px;font-size:9px;">▾ 全部展开</button>
+            <button class="chip-toggle" id="btn-collapse-all-cards" style="padding:1px 5px;font-size:9px;">▸ 全部折叠</button>
+          </div>
+        </div>
         <div class="sidebar-content" id="sidebar-content"></div>
       </aside>
     </div>
@@ -231,6 +243,200 @@ function setupResizablePanes(): void {
 
 setupResizablePanes();
 
+/**
+ * Enhances all <input type="number"> inside a container with:
+ * 1. Left/Right drag-to-scrub (both on the ↔ handle, on the input itself when not typing, and on its row label)
+ * 2. Custom sleek theme-aware ▴ / ▾ stepper buttons (replacing ugly browser spin boxes)
+ */
+function enhanceNumberInputs(root: HTMLElement): void {
+  const numInputs = Array.from(root.querySelectorAll<HTMLInputElement>('input[type="number"]'));
+  for (const inp of numInputs) {
+    if (inp.parentElement?.classList.contains('num-scrub-wrap')) continue;
+
+    const wrap = document.createElement('div');
+    wrap.className = 'num-scrub-wrap';
+    inp.parentNode?.insertBefore(wrap, inp);
+
+    const handle = document.createElement('span');
+    handle.className = 'num-scrub-handle';
+    handle.title = '按住左右拖拽可连续调节数值 (按住 Shift 微调 / Alt 快调)';
+    handle.textContent = '↔';
+    wrap.appendChild(handle);
+
+    wrap.appendChild(inp);
+
+    const stepBox = document.createElement('div');
+    stepBox.className = 'num-step-btns';
+    stepBox.innerHTML = `
+      <button type="button" class="num-step-btn" data-dir="1" tabindex="-1" title="增加">▴</button>
+      <button type="button" class="num-step-btn" data-dir="-1" tabindex="-1" title="减少">▾</button>
+    `;
+    wrap.appendChild(stepBox);
+
+    const getStep = () => {
+      const s = parseFloat(inp.step);
+      return !isNaN(s) && s > 0 ? s : 1;
+    };
+
+    const clampAndFormat = (val: number, stepVal: number): string => {
+      const min = inp.min !== '' ? parseFloat(inp.min) : -Infinity;
+      const max = inp.max !== '' ? parseFloat(inp.max) : Infinity;
+      const clamped = Math.max(min, Math.min(max, val));
+      const decimals = (stepVal.toString().split('.')[1] || '').length;
+      return Number(clamped.toFixed(Math.max(2, decimals))).toString();
+    };
+
+    const applyDelta = (dirOrMult: number, fineMode = false, fastMode = false) => {
+      const baseStep = getStep();
+      const mult = fineMode ? 0.1 : fastMode ? 5 : 1;
+      const cur = parseFloat(inp.value) || 0;
+      const next = cur + dirOrMult * baseStep * mult;
+      inp.value = clampAndFormat(next, baseStep * mult);
+      inp.dispatchEvent(new Event('input', { bubbles: true }));
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    stepBox.querySelectorAll<HTMLButtonElement>('.num-step-btn').forEach((btn) => {
+      btn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const dir = Number(btn.dataset.dir) || 1;
+        store.pushUndoSnapshot();
+        applyDelta(dir, e.shiftKey, e.altKey || e.ctrlKey);
+      });
+    });
+
+    const startScrub = (e: MouseEvent, allowClickFocus: boolean) => {
+      if (e.button !== 0) return;
+      if (allowClickFocus && document.activeElement === inp) return;
+
+      const startX = e.clientX;
+      const startVal = parseFloat(inp.value) || 0;
+      const baseStep = getStep();
+      let moved = false;
+
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        if (!moved && Math.abs(dx) > 3) {
+          moved = true;
+          isScrubbingNumber = true;
+          store.pushUndoSnapshot();
+          wrap.classList.add('scrubbing');
+          document.body.style.cursor = 'ew-resize';
+          inp.blur();
+        }
+        if (moved) {
+          ev.preventDefault();
+          const mult = ev.shiftKey ? 0.1 : ev.altKey || ev.ctrlKey ? 5 : 1;
+          const steps = Math.round(dx / 4);
+          const next = startVal + steps * baseStep * mult;
+          const formatted = clampAndFormat(next, baseStep * mult);
+          if (inp.value !== formatted) {
+            inp.value = formatted;
+            inp.dispatchEvent(new Event('input', { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }
+      };
+
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        if (moved) {
+          wrap.classList.remove('scrubbing');
+          document.body.style.cursor = '';
+          isScrubbingNumber = false;
+          renderLeftDock();
+          renderSidebar();
+        } else if (allowClickFocus) {
+          inp.focus();
+          inp.select();
+        }
+      };
+
+      if (!allowClickFocus) {
+        e.preventDefault();
+      }
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    };
+
+    handle.addEventListener('mousedown', (e) => startScrub(e, false));
+    inp.addEventListener('mousedown', (e) => startScrub(e, true));
+
+    // Also allow dragging the row's <label> if not yet bound
+    const row = inp.closest('.form-row');
+    const lbl = row?.querySelector('label');
+    if (lbl && !lbl.classList.contains('scrub-label')) {
+      lbl.classList.add('scrub-label');
+      lbl.title = '按住左右拖拽可调节数值';
+      lbl.addEventListener('mousedown', (e) => startScrub(e as MouseEvent, false));
+    }
+  }
+}
+
+/**
+ * Makes every .panel-card inside a sidebar container collapsible by clicking its .card-title
+ */
+function enhanceCollapsibleCards(container: HTMLElement): void {
+  const cards = Array.from(container.querySelectorAll<HTMLElement>('.panel-card'));
+  cards.forEach((card, idx) => {
+    const titleEl = card.querySelector<HTMLElement>('.card-title');
+    if (!titleEl) return;
+
+    const rawText = (titleEl.querySelector('span')?.textContent || titleEl.textContent || `card_${idx}`)
+      .replace(/\(\d+.*?\)/g, '')
+      .trim();
+    const cardKey = `${activeSidebarTab}:${rawText}`;
+    card.dataset.cardKey = cardKey;
+
+    // Wrap all siblings after .card-title into .card-body if not already wrapped
+    if (!card.querySelector('.card-body')) {
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      const children = Array.from(card.children);
+      for (const ch of children) {
+        if (ch !== titleEl) {
+          body.appendChild(ch);
+        }
+      }
+      card.appendChild(body);
+    }
+
+    // Add chevron indicator to title
+    if (!titleEl.querySelector('.collapse-chevron')) {
+      const firstSpan = titleEl.querySelector('span');
+      const chev = document.createElement('span');
+      chev.className = 'collapse-chevron';
+      chev.textContent = '▾';
+      chev.style.marginRight = '5px';
+      if (firstSpan) {
+        firstSpan.prepend(chev);
+      } else {
+        titleEl.prepend(chev);
+      }
+    }
+
+    if (collapsedCards.has(cardKey)) {
+      card.classList.add('collapsed');
+    }
+
+    titleEl.onclick = (e) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('button') || target.closest('select') || target.closest('input')) {
+        return;
+      }
+      if (collapsedCards.has(cardKey)) {
+        collapsedCards.delete(cardKey);
+        card.classList.remove('collapsed');
+      } else {
+        collapsedCards.add(cardKey);
+        card.classList.add('collapsed');
+      }
+    };
+  });
+}
+
 function renderTopBar(): void {
   const topbar = document.getElementById('topbar')!;
   const lang = getLang();
@@ -238,6 +444,9 @@ function renderTopBar(): void {
 
   topbar.innerHTML = `
     <div class="brand-group">
+      <button id="btn-toggle-left-dock" class="btn" title="折叠/展开左侧工具栏" style="padding:4px 6px;">
+        ${isLeftDockCollapsed ? '▶ 工具' : '◀'}
+      </button>
       <div class="brand-logo">
         <span class="brand-badge">LB</span>
         <span>Level Builder</span>
@@ -252,7 +461,7 @@ function renderTopBar(): void {
       </div>
       
       <!-- Dedicated New Scene Menu -->
-      <select id="new-scene-select" class="select-pill" style="border-color:var(--accent);color:#e0f2fe;font-weight:600;">
+      <select id="new-scene-select" class="select-pill" style="border-color:var(--accent);font-weight:600;">
         <option value="">${t('newSceneBtn')}...</option>
         <option value="starter">📐 ${t('newSceneEmpty')}</option>
         <option value="zero">📄 ${t('newSceneZero')}</option>
@@ -321,8 +530,36 @@ function renderTopBar(): void {
         <span class="dot"></span>
         <span id="bridge-text">${store.bridgeConnected ? t('bridgeOnline') : store.isOnlineStaticHost() ? '🌐 在线版' : t('bridgeOffline')}</span>
       </div>
+
+      <button id="btn-toggle-right-sidebar" class="btn" title="折叠/展开右侧属性分析栏" style="padding:4px 6px;">
+        ${isRightSidebarCollapsed ? '◀ 属性' : '▶'}
+      </button>
     </div>
   `;
+
+  document.getElementById('btn-toggle-left-dock')!.onclick = () => {
+    isLeftDockCollapsed = !isLeftDockCollapsed;
+    document.getElementById('left-dock')!.classList.toggle('collapsed', isLeftDockCollapsed);
+    document.getElementById('resizer-left-dock')!.style.display = isLeftDockCollapsed ? 'none' : '';
+    renderTopBar();
+    setTimeout(() => {
+      vp3D.resize();
+      vpTop.resize();
+      vpSec.resize();
+    }, 160);
+  };
+
+  document.getElementById('btn-toggle-right-sidebar')!.onclick = () => {
+    isRightSidebarCollapsed = !isRightSidebarCollapsed;
+    document.getElementById('right-sidebar')!.classList.toggle('collapsed', isRightSidebarCollapsed);
+    document.getElementById('resizer-right-sidebar')!.style.display = isRightSidebarCollapsed ? 'none' : '';
+    renderTopBar();
+    setTimeout(() => {
+      vp3D.resize();
+      vpTop.resize();
+      vpSec.resize();
+    }, 160);
+  };
 
   topbar.querySelectorAll<HTMLButtonElement>('[data-dim]').forEach((btn) => {
     btn.onclick = () => {
@@ -456,157 +693,195 @@ function renderLeftDock(): void {
   const cd = store.creationDefaults;
 
   dock.innerHTML = `
-    <div class="dock-section">
-      <div class="dock-title">${t('sec1Title')}</div>
-      <div class="tool-grid">
-        <button class="tool-btn full ${tool === 'select' ? 'active' : ''}" data-tool="select">
-          ${t('toolSelect')}
-        </button>
-        <button class="tool-btn ${tf === 'translate' ? 'active' : ''}" data-tf="translate">
-          ${t('tfTranslate')}
-        </button>
-        <button class="tool-btn ${tf === 'rotate' ? 'active' : ''}" data-tf="rotate">
-          ${t('tfRotate')}
-        </button>
-        <button class="tool-btn ${tf === 'scale' ? 'active' : ''}" data-tf="scale">
-          ${t('tfScale')}
-        </button>
-        <button class="tool-btn" id="btn-dock-frame" style="border-color:rgba(250,204,21,0.5);color:#fde047;">
-          ${t('btnFrameSel')}
-        </button>
+    <div class="dock-section ${collapsedDockSections.has('sec1') ? 'collapsed' : ''}" data-dock-sec="sec1">
+      <div class="dock-section-header">
+        <span>${t('sec1Title')}</span>
+        <span class="collapse-chevron">▾</span>
       </div>
-    </div>
-
-    <div class="dock-section">
-      <div class="dock-title">${t('sec2Title')}</div>
-      <div class="tool-grid">
-        <button class="tool-btn ${tool === 'draw_box' ? 'active' : ''}" data-tool="draw_box">
-          ${t('toolBox')}
-        </button>
-        <button class="tool-btn ${tool === 'draw_ramp' ? 'active' : ''}" data-tool="draw_ramp">
-          ${t('toolRamp')}
-        </button>
-        <button class="tool-btn ${tool === 'draw_stairs' ? 'active' : ''}" data-tool="draw_stairs">
-          ${t('toolStairs')}
-        </button>
-        <button class="tool-btn ${tool === 'draw_arch' ? 'active' : ''}" data-tool="draw_arch">
-          ${t('toolArch')}
-        </button>
-        <button class="tool-btn full ${tool === 'draw_cylinder' ? 'active' : ''}" data-tool="draw_cylinder">
-          ${t('toolCylinder')}
-        </button>
-      </div>
-
-      <button class="btn btn-primary" id="btn-quick-spawn-3d" style="width:100%;justify-content:center;margin-top:2px;">
-        ${t('quickSpawn3D')}
-      </button>
-
-      <div class="dock-title" style="margin-top:4px;">${t('roleTitle')}</div>
-      <div class="role-chip-list">
-        ${(Object.keys(ROLE_META) as BlockRole[])
-          .map((roleKey) => {
-            const m = ROLE_META[roleKey];
-            return `
-              <button class="role-chip ${cd.role === roleKey ? 'active' : ''}" data-role="${roleKey}">
-                <span class="color-swatch" style="background:${m.color}"></span>
-                <span>${m.label.split(' ')[0]}</span>
-              </button>
-            `;
-          })
-          .join('')}
-      </div>
-
-      <div class="form-row" style="margin-top:4px;">
-        <label>${t('floorPreset')}</label>
-        <select id="dock-floor-preset">
-          <option value="-1" ${cd.floor === -1 ? 'selected' : ''}>B1 (-3.0m)</option>
-          <option value="0" ${cd.floor === 0 ? 'selected' : ''}>1F (±0.0m)</option>
-          <option value="1" ${cd.floor === 1 ? 'selected' : ''}>2F (+3.0m)</option>
-          <option value="2" ${cd.floor === 2 ? 'selected' : ''}>3F (+6.0m)</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label>${t('baseAndHeight')}</label>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
-          <input id="dock-base-y" type="number" step="0.5" value="${cd.baseY}" title="Base Y (m)" />
-          <input id="dock-height" type="number" step="0.25" min="0.2" value="${cd.height}" title="Height (m)" />
+      <div class="dock-section-body">
+        <div class="tool-grid">
+          <button class="tool-btn full ${tool === 'select' ? 'active' : ''}" data-tool="select">
+            ${t('toolSelect')}
+          </button>
+          <button class="tool-btn ${tf === 'translate' ? 'active' : ''}" data-tf="translate">
+            ${t('tfTranslate')}
+          </button>
+          <button class="tool-btn ${tf === 'rotate' ? 'active' : ''}" data-tf="rotate">
+            ${t('tfRotate')}
+          </button>
+          <button class="tool-btn ${tf === 'scale' ? 'active' : ''}" data-tf="scale">
+            ${t('tfScale')}
+          </button>
+          <button class="tool-btn" id="btn-dock-frame" style="border-color:rgba(250,204,21,0.5);">
+            ${t('btnFrameSel')}
+          </button>
         </div>
       </div>
+    </div>
 
-      <!-- Custom Block Creation Color Override -->
-      <div class="dock-title" style="margin-top:4px;display:flex;justify-content:space-between;align-items:center;">
-        <span>🎨 新建/选中白盒自定义颜色</span>
+    <div class="dock-section ${collapsedDockSections.has('sec2') ? 'collapsed' : ''}" data-dock-sec="sec2">
+      <div class="dock-section-header">
+        <span>${t('sec2Title')}</span>
+        <span class="collapse-chevron">▾</span>
+      </div>
+      <div class="dock-section-body">
+        <div class="tool-grid">
+          <button class="tool-btn ${tool === 'draw_box' ? 'active' : ''}" data-tool="draw_box">
+            ${t('toolBox')}
+          </button>
+          <button class="tool-btn ${tool === 'draw_ramp' ? 'active' : ''}" data-tool="draw_ramp">
+            ${t('toolRamp')}
+          </button>
+          <button class="tool-btn ${tool === 'draw_stairs' ? 'active' : ''}" data-tool="draw_stairs">
+            ${t('toolStairs')}
+          </button>
+          <button class="tool-btn ${tool === 'draw_arch' ? 'active' : ''}" data-tool="draw_arch">
+            ${t('toolArch')}
+          </button>
+          <button class="tool-btn full ${tool === 'draw_cylinder' ? 'active' : ''}" data-tool="draw_cylinder">
+            ${t('toolCylinder')}
+          </button>
+        </div>
+
+        <button class="btn btn-primary" id="btn-quick-spawn-3d" style="width:100%;justify-content:center;margin-top:2px;">
+          ${t('quickSpawn3D')}
+        </button>
+
+        <div class="form-row" style="margin-top:2px;">
+          <label>${t('floorPreset')}</label>
+          <select id="dock-floor-preset">
+            <option value="-1" ${cd.floor === -1 ? 'selected' : ''}>B1 (-3.0m)</option>
+            <option value="0" ${cd.floor === 0 ? 'selected' : ''}>1F (±0.0m)</option>
+            <option value="1" ${cd.floor === 1 ? 'selected' : ''}>2F (+3.0m)</option>
+            <option value="2" ${cd.floor === 2 ? 'selected' : ''}>3F (+6.0m)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label>${t('baseAndHeight')}</label>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px;">
+            <input id="dock-base-y" type="number" step="0.5" value="${cd.baseY}" title="Base Y (m)" />
+            <input id="dock-height" type="number" step="0.25" min="0.2" value="${cd.height}" title="Height (m)" />
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="dock-section ${collapsedDockSections.has('sec_role') ? 'collapsed' : ''}" data-dock-sec="sec_role">
+      <div class="dock-section-header">
+        <span>${t('roleTitle')}</span>
+        <span class="collapse-chevron">▾</span>
+      </div>
+      <div class="dock-section-body">
+        <div class="role-chip-list">
+          ${(Object.keys(ROLE_META) as BlockRole[])
+            .map((roleKey) => {
+              const m = ROLE_META[roleKey];
+              return `
+                <button class="role-chip ${cd.role === roleKey ? 'active' : ''}" data-role="${roleKey}">
+                  <span class="color-swatch" style="background:${m.color}"></span>
+                  <span>${m.label.split(' ')[0]}</span>
+                </button>
+              `;
+            })
+            .join('')}
+        </div>
+
+        <!-- Custom Block Creation Color Override -->
+        <div class="dock-title" style="margin-top:4px;display:flex;justify-content:space-between;align-items:center;">
+          <span>🎨 白盒自定义颜色</span>
+          ${
+            cd.customColor
+              ? `<button class="chip-toggle" id="dock-clear-color" style="padding:1px 5px;font-size:9px;">恢复语义色</button>`
+              : `<span style="font-size:9px;color:var(--text-muted);">跟随语义</span>`
+          }
+        </div>
+        <div class="swatch-row">
+          <input type="color" id="dock-custom-color" class="color-picker-input" value="${cd.customColor || ROLE_META[cd.role].color}" title="点击自由取色" />
+          ${QUICK_COLOR_SWATCHES.map(
+            (hex) =>
+              `<span class="swatch-dot ${cd.customColor === hex ? 'active' : ''}" data-dock-swatch="${hex}" style="background:${hex}" title="${hex}"></span>`
+          ).join('')}
+        </div>
+      </div>
+    </div>
+
+    <div class="dock-section ${collapsedDockSections.has('sec3') ? 'collapsed' : ''}" data-dock-sec="sec3">
+      <div class="dock-section-header">
+        <span>${t('sec3Title')}</span>
+        <span class="collapse-chevron">▾</span>
+      </div>
+      <div class="dock-section-body">
+        <div class="tool-grid">
+          <button class="tool-btn full ${tool === 'edit_section' ? 'active' : ''}" data-tool="edit_section">
+            ${t('toolSection')}
+          </button>
+          <button class="tool-btn full ${tool === 'measure_jump' ? 'active' : ''}" data-tool="measure_jump">
+            ${t('toolJump')}
+          </button>
+          <button class="tool-btn full ${tool === 'measure_ruler' ? 'active' : ''}" data-tool="measure_ruler">
+            ${t('toolRuler')}
+          </button>
+          <button class="tool-btn full ${tool === 'add_enemy_waypoint' ? 'active' : ''}" data-tool="add_enemy_waypoint">
+            ${t('toolEnemyWP')}
+          </button>
+          <button class="tool-btn ${tool === 'place_poi' ? 'active' : ''}" data-tool="place_poi">
+            ${t('toolPOI')}
+          </button>
+          <button class="tool-btn ${tool === 'draw_path' ? 'active' : ''}" data-tool="draw_path">
+            ${t('toolPath')}
+          </button>
+        </div>
+
         ${
-          cd.customColor
-            ? `<button class="chip-toggle" id="dock-clear-color" style="padding:1px 5px;font-size:9px;">恢复语义色</button>`
-            : `<span style="font-size:9px;color:var(--text-muted);">当前跟随语义</span>`
+          tool === 'place_poi'
+            ? `
+          <div class="form-row" style="margin-top:4px;">
+            <label>POI</label>
+            <select id="dock-poi-cat">
+              ${(Object.keys(POI_META) as POICategory[])
+                .map(
+                  (k) =>
+                    `<option value="${k}" ${vpTop.activePOICategory === k ? 'selected' : ''}>${POI_META[k].icon} ${POI_META[k].label}</option>`
+                )
+                .join('')}
+            </select>
+          </div>`
+            : ''
+        }
+
+        ${
+          tool === 'draw_path'
+            ? `
+          <div class="form-row" style="margin-top:4px;">
+            <label>Path</label>
+            <select id="dock-path-type">
+              <option value="main" ${vpTop.activePathType === 'main' ? 'selected' : ''}>Golden Path</option>
+              <option value="flank" ${vpTop.activePathType === 'flank' ? 'selected' : ''}>Flank Route</option>
+              <option value="secret" ${vpTop.activePathType === 'secret' ? 'selected' : ''}>Secret</option>
+              <option value="patrol" ${vpTop.activePathType === 'patrol' ? 'selected' : ''}>Patrol</option>
+            </select>
+          </div>`
+            : ''
         }
       </div>
-      <div class="swatch-row">
-        <input type="color" id="dock-custom-color" class="color-picker-input" value="${cd.customColor || ROLE_META[cd.role].color}" title="点击自由取色" />
-        ${QUICK_COLOR_SWATCHES.map(
-          (hex) =>
-            `<span class="swatch-dot ${cd.customColor === hex ? 'active' : ''}" data-dock-swatch="${hex}" style="background:${hex}" title="${hex}"></span>`
-        ).join('')}
-      </div>
-    </div>
-
-    <div class="dock-section">
-      <div class="dock-title">${t('sec3Title')}</div>
-      <div class="tool-grid">
-        <button class="tool-btn full ${tool === 'edit_section' ? 'active' : ''}" data-tool="edit_section">
-          ${t('toolSection')}
-        </button>
-        <button class="tool-btn full ${tool === 'measure_jump' ? 'active' : ''}" data-tool="measure_jump">
-          ${t('toolJump')}
-        </button>
-        <button class="tool-btn full ${tool === 'measure_ruler' ? 'active' : ''}" data-tool="measure_ruler">
-          ${t('toolRuler')}
-        </button>
-        <button class="tool-btn full ${tool === 'add_enemy_waypoint' ? 'active' : ''}" data-tool="add_enemy_waypoint">
-          ${t('toolEnemyWP')}
-        </button>
-        <button class="tool-btn ${tool === 'place_poi' ? 'active' : ''}" data-tool="place_poi">
-          ${t('toolPOI')}
-        </button>
-        <button class="tool-btn ${tool === 'draw_path' ? 'active' : ''}" data-tool="draw_path">
-          ${t('toolPath')}
-        </button>
-      </div>
-
-      ${
-        tool === 'place_poi'
-          ? `
-        <div class="form-row" style="margin-top:4px;">
-          <label>POI</label>
-          <select id="dock-poi-cat">
-            ${(Object.keys(POI_META) as POICategory[])
-              .map(
-                (k) =>
-                  `<option value="${k}" ${vpTop.activePOICategory === k ? 'selected' : ''}>${POI_META[k].icon} ${POI_META[k].label}</option>`
-              )
-              .join('')}
-          </select>
-        </div>`
-          : ''
-      }
-
-      ${
-        tool === 'draw_path'
-          ? `
-        <div class="form-row" style="margin-top:4px;">
-          <label>Path</label>
-          <select id="dock-path-type">
-            <option value="main" ${vpTop.activePathType === 'main' ? 'selected' : ''}>Golden Path</option>
-            <option value="flank" ${vpTop.activePathType === 'flank' ? 'selected' : ''}>Flank Route</option>
-            <option value="secret" ${vpTop.activePathType === 'secret' ? 'selected' : ''}>Secret</option>
-            <option value="patrol" ${vpTop.activePathType === 'patrol' ? 'selected' : ''}>Patrol</option>
-          </select>
-        </div>`
-          : ''
-      }
     </div>
   `;
+
+  dock.querySelectorAll<HTMLElement>('.dock-section').forEach((secEl) => {
+    const secKey = secEl.dataset.dockSec!;
+    const hdr = secEl.querySelector<HTMLElement>('.dock-section-header');
+    if (hdr) {
+      hdr.onclick = () => {
+        if (collapsedDockSections.has(secKey)) {
+          collapsedDockSections.delete(secKey);
+          secEl.classList.remove('collapsed');
+        } else {
+          collapsedDockSections.add(secKey);
+          secEl.classList.add('collapsed');
+        }
+      };
+    }
+  });
 
   dock.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((btn) => {
     btn.onclick = () => {
@@ -765,6 +1040,8 @@ function renderLeftDock(): void {
       vpTop.activePathType = pathTypeSel.value as 'main' | 'flank' | 'secret' | 'patrol';
     };
   }
+
+  enhanceNumberInputs(dock);
 }
 
 function renderOverlayBar(): void {
@@ -990,6 +1267,27 @@ function renderSidebar(): void {
     renderAuditTab(container);
   } else {
     renderAITab(container);
+  }
+  enhanceCollapsibleCards(container);
+  enhanceNumberInputs(container);
+
+  const btnExpandAll = document.getElementById('btn-expand-all-cards');
+  const btnCollapseAll = document.getElementById('btn-collapse-all-cards');
+  if (btnExpandAll) {
+    btnExpandAll.onclick = () => {
+      container.querySelectorAll<HTMLElement>('.panel-card').forEach((c) => {
+        if (c.dataset.cardKey) collapsedCards.delete(c.dataset.cardKey);
+        c.classList.remove('collapsed');
+      });
+    };
+  }
+  if (btnCollapseAll) {
+    btnCollapseAll.onclick = () => {
+      container.querySelectorAll<HTMLElement>('.panel-card').forEach((c) => {
+        if (c.dataset.cardKey) collapsedCards.add(c.dataset.cardKey);
+        c.classList.add('collapsed');
+      });
+    };
   }
 }
 
@@ -1573,7 +1871,7 @@ function renderInspectorTab(container: HTMLElement): void {
           },
           true
         );
-        renderSidebar();
+        if (!isScrubbingNumber) renderSidebar();
         return;
       }
 
@@ -1616,7 +1914,7 @@ function renderInspectorTab(container: HTMLElement): void {
         },
         true
       );
-      renderSidebar();
+      if (!isScrubbingNumber) renderSidebar();
     };
 
     [
@@ -1648,8 +1946,11 @@ function renderInspectorTab(container: HTMLElement): void {
       'ins-pvis-range',
       'ins-pvis-periph',
     ].forEach((id) => {
-      const el = document.getElementById(id);
-      if (el) el.onchange = updatePOI;
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      if (el) {
+        el.onchange = updatePOI;
+        if (el.type === 'number') el.oninput = updatePOI;
+      }
     });
 
     document.getElementById('ins-frame-poi')!.onclick = () => store.requestFrameSelected();
@@ -2371,13 +2672,14 @@ function renderThemeStudio(): void {
   const th = getTheme();
   const lang = getLang();
 
+  const presetCount = Object.keys(THEME_PRESETS).length;
   panel.innerHTML = `
-    <div class="card-title" style="font-size:13px;">
+    <div class="card-title" style="font-size:13px;cursor:default;">
       <span>🎨 界面主题模板与自定义颜色工作台</span>
       <button class="btn" id="btn-close-theme-studio">✕ 关闭</button>
     </div>
 
-    <div class="dock-title">1. 常规界面颜色模板 (6套工业级预设)</div>
+    <div class="dock-title">1. 常规界面颜色模板 (${presetCount}套工业级与设计师预设)</div>
     <div class="theme-preset-grid">
       ${Object.values(THEME_PRESETS)
         .map((p) => {
@@ -2618,11 +2920,13 @@ window.addEventListener('keydown', (e) => {
 
 store.subscribe(() => {
   renderTopBar();
-  renderLeftDock();
+  if (!isScrubbingNumber) {
+    renderLeftDock();
+    renderSidebar();
+  }
   renderOverlayBar();
   renderFloatingNoteCard();
   renderSidebarTabs();
-  renderSidebar();
   updateStatusBar();
 });
 
