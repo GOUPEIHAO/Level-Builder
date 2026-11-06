@@ -59,6 +59,14 @@ import {
 import { Viewport3D } from './viewports/Viewport3D';
 import { ViewportSection2D } from './viewports/ViewportSection2D';
 import { ViewportTop2D } from './viewports/ViewportTop2D';
+import {
+  animateCollapse,
+  animateOut,
+  installRippleEffect,
+  runEveryFrameFor,
+  staggerIn,
+  withThemeTransition,
+} from './ui/motion';
 
 const store = new LevelStore();
 applyThemeToDOM();
@@ -199,6 +207,7 @@ function setupResizablePanes(): void {
     handle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       handle.classList.add('dragging');
+      document.body.classList.add('is-resizing');
       const moveHandler = (ev: MouseEvent) => {
         onMove(ev);
         vp3D.resize();
@@ -207,6 +216,7 @@ function setupResizablePanes(): void {
       };
       const upHandler = () => {
         handle.classList.remove('dragging');
+        document.body.classList.remove('is-resizing');
         window.removeEventListener('mousemove', moveHandler);
         window.removeEventListener('mouseup', upHandler);
         vp3D.resize();
@@ -242,6 +252,7 @@ function setupResizablePanes(): void {
 }
 
 setupResizablePanes();
+installRippleEffect();
 
 /**
  * Enhances all <input type="number"> inside a container with:
@@ -428,10 +439,10 @@ function enhanceCollapsibleCards(container: HTMLElement): void {
       }
       if (collapsedCards.has(cardKey)) {
         collapsedCards.delete(cardKey);
-        card.classList.remove('collapsed');
+        animateCollapse(card, ':scope > .card-body', false);
       } else {
         collapsedCards.add(cardKey);
-        card.classList.add('collapsed');
+        animateCollapse(card, ':scope > .card-body', true);
       }
     };
   });
@@ -542,11 +553,11 @@ function renderTopBar(): void {
     document.getElementById('left-dock')!.classList.toggle('collapsed', isLeftDockCollapsed);
     document.getElementById('resizer-left-dock')!.style.display = isLeftDockCollapsed ? 'none' : '';
     renderTopBar();
-    setTimeout(() => {
+    runEveryFrameFor(340, () => {
       vp3D.resize();
       vpTop.resize();
       vpSec.resize();
-    }, 160);
+    });
   };
 
   document.getElementById('btn-toggle-right-sidebar')!.onclick = () => {
@@ -554,11 +565,11 @@ function renderTopBar(): void {
     document.getElementById('right-sidebar')!.classList.toggle('collapsed', isRightSidebarCollapsed);
     document.getElementById('resizer-right-sidebar')!.style.display = isRightSidebarCollapsed ? 'none' : '';
     renderTopBar();
-    setTimeout(() => {
+    runEveryFrameFor(340, () => {
       vp3D.resize();
       vpTop.resize();
       vpSec.resize();
-    }, 160);
+    });
   };
 
   topbar.querySelectorAll<HTMLButtonElement>('[data-dim]').forEach((btn) => {
@@ -649,9 +660,16 @@ function renderTopBar(): void {
   };
 
   document.getElementById('btn-open-theme-studio')!.onclick = () => {
-    isThemeStudioOpen = !isThemeStudioOpen;
+    if (isThemeStudioOpen) {
+      closeThemeStudio();
+      return;
+    }
+    isThemeStudioOpen = true;
     renderThemeStudio();
     renderTopBar();
+    const backdropEl = document.getElementById('theme-studio-backdrop')!;
+    backdropEl.classList.add('intro');
+    window.setTimeout(() => backdropEl.classList.remove('intro'), 520);
   };
 
   // Update viewport headers
@@ -679,9 +697,12 @@ function renderSidebarTabs(): void {
   `;
   tabsEl.querySelectorAll<HTMLButtonElement>('.tab-btn').forEach((btn) => {
     btn.onclick = () => {
+      if (activeSidebarTab === btn.dataset.tab) return;
       activeSidebarTab = btn.dataset.tab as typeof activeSidebarTab;
       renderSidebarTabs();
       renderSidebar();
+      const content = document.getElementById('sidebar-content');
+      if (content) staggerIn(content);
     };
   });
 }
@@ -874,10 +895,10 @@ function renderLeftDock(): void {
       hdr.onclick = () => {
         if (collapsedDockSections.has(secKey)) {
           collapsedDockSections.delete(secKey);
-          secEl.classList.remove('collapsed');
+          animateCollapse(secEl, ':scope > .dock-section-body', false);
         } else {
           collapsedDockSections.add(secKey);
-          secEl.classList.add('collapsed');
+          animateCollapse(secEl, ':scope > .dock-section-body', true);
         }
       };
     }
@@ -1107,10 +1128,18 @@ function renderFloatingNoteCard(): void {
   const poi = store.getSelectedPOI();
 
   if (store.isPlaytesting || (!blk && !poi) || !store.showFloatingNoteCard) {
-    card.classList.remove('visible');
+    if (card.classList.contains('visible') && !card.classList.contains('leaving')) {
+      card.classList.add('leaving');
+      window.setTimeout(() => {
+        if (card.classList.contains('leaving')) {
+          card.classList.remove('visible', 'leaving');
+        }
+      }, 170);
+    }
     return;
   }
 
+  card.classList.remove('leaving');
   card.classList.add('visible');
 
   const allTargets = [
@@ -1277,7 +1306,7 @@ function renderSidebar(): void {
     btnExpandAll.onclick = () => {
       container.querySelectorAll<HTMLElement>('.panel-card').forEach((c) => {
         if (c.dataset.cardKey) collapsedCards.delete(c.dataset.cardKey);
-        c.classList.remove('collapsed');
+        if (c.classList.contains('collapsed')) animateCollapse(c, ':scope > .card-body', false);
       });
     };
   }
@@ -1285,7 +1314,7 @@ function renderSidebar(): void {
     btnCollapseAll.onclick = () => {
       container.querySelectorAll<HTMLElement>('.panel-card').forEach((c) => {
         if (c.dataset.cardKey) collapsedCards.add(c.dataset.cardKey);
-        c.classList.add('collapsed');
+        if (!c.classList.contains('collapsed')) animateCollapse(c, ':scope > .card-body', true);
       });
     };
   }
@@ -2663,6 +2692,24 @@ claude mcp add levelforge -- npx tsx server/mcp-server.ts</div>
   };
 }
 
+function closeThemeStudio(): void {
+  if (!isThemeStudioOpen) return;
+  const backdrop = document.getElementById('theme-studio-backdrop')!;
+  const panel = document.getElementById('theme-studio-panel')!;
+  isThemeStudioOpen = false;
+  renderTopBar();
+  animateOut(
+    panel,
+    [
+      { opacity: 1, transform: 'translateY(0) scale(1)' },
+      { opacity: 0, transform: 'translateY(-8px) scale(0.97)' },
+    ],
+    170,
+    () => {}
+  );
+  animateOut(backdrop, [{ opacity: 1 }, { opacity: 0 }], 190, () => renderThemeStudio());
+}
+
 function renderThemeStudio(): void {
   const backdrop = document.getElementById('theme-studio-backdrop')!;
   const panel = document.getElementById('theme-studio-panel')!;
@@ -2755,25 +2802,19 @@ function renderThemeStudio(): void {
     </div>
   `;
 
-  document.getElementById('btn-close-theme-studio')!.onclick = () => {
-    isThemeStudioOpen = false;
-    renderThemeStudio();
-    renderTopBar();
-  };
+  document.getElementById('btn-close-theme-studio')!.onclick = () => closeThemeStudio();
 
   backdrop.onclick = (e) => {
-    if (e.target === backdrop) {
-      isThemeStudioOpen = false;
-      renderThemeStudio();
-      renderTopBar();
-    }
+    if (e.target === backdrop) closeThemeStudio();
   };
 
   panel.querySelectorAll<HTMLElement>('[data-preset-theme]').forEach((card) => {
     card.onclick = () => {
-      selectPresetTheme(card.dataset.presetTheme!);
-      renderAllUI();
-      renderThemeStudio();
+      withThemeTransition(() => {
+        selectPresetTheme(card.dataset.presetTheme!);
+        renderAllUI();
+        renderThemeStudio();
+      });
     };
   });
 

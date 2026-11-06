@@ -161,17 +161,11 @@ export class Viewport3D {
     this.store.onFrameSelected(() => this.frameSelected());
     this.store.onDimensionModeChanged((mode) => {
       if (mode === '2d_side') {
-        this.orbit.target.set(0, 3, 0);
-        this.camera.position.set(0, 4, 26);
-        this.orbit.update();
+        this.tweenCameraTo(new THREE.Vector3(0, 4, 26), new THREE.Vector3(0, 3, 0), 520);
       } else if (mode === '2d_topdown') {
-        this.orbit.target.set(0, 0, 0);
-        this.camera.position.set(0, 32, 3);
-        this.orbit.update();
+        this.tweenCameraTo(new THREE.Vector3(0, 32, 3), new THREE.Vector3(0, 0, 0), 520);
       } else {
-        this.orbit.target.set(0, 1, 0);
-        this.camera.position.set(18, 16, 24);
-        this.orbit.update();
+        this.tweenCameraTo(new THREE.Vector3(18, 16, 24), new THREE.Vector3(0, 1, 0), 520);
       }
     });
 
@@ -265,12 +259,10 @@ export class Viewport3D {
             const [nx, ny, nz] = hit.normal;
             // Slight offset on X/Z when looking straight along Y to avoid gimbal lock in OrbitControls
             const epsZ = Math.abs(ny) > 0.9 ? 0.01 : 0;
-            this.camera.position.set(
-              target.x + nx * dist,
-              target.y + ny * dist,
-              target.z + nz * dist + epsZ
+            this.tweenCameraTo(
+              new THREE.Vector3(target.x + nx * dist, target.y + ny * dist, target.z + nz * dist + epsZ),
+              target
             );
-            this.orbit.update();
           }
         }
       };
@@ -283,8 +275,7 @@ export class Viewport3D {
         const act = btn.dataset.vcAct;
         if (act === 'iso') {
           const target = this.orbit.target.clone();
-          this.camera.position.set(target.x + 18, target.y + 16, target.z + 24);
-          this.orbit.update();
+          this.tweenCameraTo(new THREE.Vector3(target.x + 18, target.y + 16, target.z + 24), target);
         } else if (act === 'focus') {
           this.frameSelected();
         }
@@ -516,19 +507,72 @@ export class Viewport3D {
       const dist = Math.max(6, Math.max(blk.size[0], blk.size[1], blk.size[2]) * 1.9);
       const offsetDir = this.camera.position.clone().sub(this.orbit.target).normalize();
       if (offsetDir.lengthSq() < 0.01) offsetDir.set(0.6, 0.5, 0.6).normalize();
-      this.orbit.target.set(x, y, z);
-      this.camera.position.copy(this.orbit.target).addScaledVector(offsetDir, dist);
-      this.orbit.update();
+      const newTarget = new THREE.Vector3(x, y, z);
+      this.tweenCameraTo(newTarget.clone().addScaledVector(offsetDir, dist), newTarget);
       return;
     }
     const poi = this.store.getSelectedPOI();
     if (poi) {
       const [x, y, z] = poi.position;
       const offsetDir = this.camera.position.clone().sub(this.orbit.target).normalize();
-      this.orbit.target.set(x, y + 1, z);
-      this.camera.position.copy(this.orbit.target).addScaledVector(offsetDir, 10);
-      this.orbit.update();
+      const newTarget = new THREE.Vector3(x, y + 1, z);
+      this.tweenCameraTo(newTarget.clone().addScaledVector(offsetDir, 10), newTarget);
     }
+  }
+
+  private cameraTweenId = 0;
+
+  /**
+   * 平滑镜头过渡：围绕目标点做球面插值（半径/俯仰/方位角），避免镜头穿过目标点。
+   * 用户在过渡中手动操作镜头（鼠标按下 / 滚轮）时会立即中断过渡。
+   */
+  public tweenCameraTo(endPos: THREE.Vector3, endTarget: THREE.Vector3, duration = 420): void {
+    const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const id = ++this.cameraTweenId;
+    if (reduce || duration <= 0) {
+      this.orbit.target.copy(endTarget);
+      this.camera.position.copy(endPos);
+      this.orbit.update();
+      return;
+    }
+    const startTarget = this.orbit.target.clone();
+    const startSph = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(startTarget));
+    const endSph = new THREE.Spherical().setFromVector3(endPos.clone().sub(endTarget));
+    let dTheta = endSph.theta - startSph.theta;
+    while (dTheta > Math.PI) dTheta -= Math.PI * 2;
+    while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+    const t0 = performance.now();
+    const dom = this.renderer.domElement;
+    const cancel = () => {
+      if (id === this.cameraTweenId) this.cameraTweenId++;
+    };
+    dom.addEventListener('pointerdown', cancel, { once: true });
+    dom.addEventListener('wheel', cancel, { once: true, passive: true });
+    const cleanup = () => {
+      dom.removeEventListener('pointerdown', cancel);
+      dom.removeEventListener('wheel', cancel);
+    };
+    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+    const step = (now: number) => {
+      if (id !== this.cameraTweenId) {
+        cleanup();
+        return;
+      }
+      const raw = Math.min(1, (now - t0) / duration);
+      const k = easeOutCubic(raw);
+      const sph = new THREE.Spherical(
+        startSph.radius + (endSph.radius - startSph.radius) * k,
+        startSph.phi + (endSph.phi - startSph.phi) * k,
+        startSph.theta + dTheta * k
+      );
+      const tgt = startTarget.clone().lerp(endTarget, k);
+      this.orbit.target.copy(tgt);
+      this.camera.position.copy(tgt).add(new THREE.Vector3().setFromSpherical(sph));
+      this.orbit.update();
+      if (raw < 1) requestAnimationFrame(step);
+      else cleanup();
+    };
+    requestAnimationFrame(step);
   }
 
   private create3DPreviewBox(): THREE.Group {
