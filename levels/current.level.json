@@ -1,0 +1,62 @@
+{
+  "version": "1.0.0",
+  "metadata": {
+    "name": "空白场景 (Empty_Scene)",
+    "author": "LevelDesigner",
+    "genre": "Custom 3D Level",
+    "gridSize": 0.5,
+    "snapRotation": 15,
+    "targetCompletionTimeSec": 30,
+    "description": "纯空白场景，可在 3D 或 2D 视口从零开始创建白盒。",
+    "updatedAt": "2026-11-06T02:49:28.566Z"
+  },
+  "metricsProfile": {
+    "presetName": "第三人称战术射击 / 动作 (TPS Tactical)",
+    "playerHeight": 3.5,
+    "playerRadius": 1.2,
+    "crouchHeight": 0.4,
+    "eyeHeight": 3.2,
+    "walkSpeed": 4.5,
+    "runSpeed": 7,
+    "crouchSpeed": 2.5,
+    "jumpHeight": 1.6,
+    "jumpDistance": 5,
+    "doubleJumpHeight": 2.8,
+    "doubleJumpDistance": 7.5,
+    "maxSlopeAngle": 45,
+    "maxStepHeight": 0.35,
+    "lowCoverHeight": 1.1,
+    "fullCoverHeight": 1.85,
+    "minCorridorWidth": 2.5,
+    "gravity": 18,
+    "cameraMode": "tps",
+    "cameraFov": 68,
+    "cameraDistance": 3.2,
+    "cameraOffsetY": 1.65,
+    "cameraShoulderOffset": 0.45,
+    "cameraPitch": -10,
+    "cameraCollision": true,
+    "showPlayerCameraFrustum": true,
+    "showPlayerVision": true,
+    "playerVisionFov": 95,
+    "playerVisionRange": 26,
+    "playerPeripheralRange": 5
+  },
+  "sectionPlane": {
+    "start": [
+      -12,
+      0
+    ],
+    "end": [
+      12,
+      0
+    ],
+    "slabDepth": 8,
+    "clip3D": false,
+    "flipNormal": false
+  },
+  "blocks": [],
+  "paths": [],
+  "pois": [],
+  "jumps": []
+}

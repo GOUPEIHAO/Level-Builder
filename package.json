@@ -1,0 +1,32 @@
+{
+  "name": "level-builder",
+  "version": "1.0.0",
+  "description": "Level Builder — Pro Web Greybox Level Design Workbench with Real-Time 2D Top-Down, Cross-Section, 3D Viewport, Metrics Analysis & Claude/Codex AI Bridge",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "bridge": "tsx server/bridge-server.ts",
+    "start": "concurrently -k -n BRIDGE,WEB \"npm run bridge\" \"npm run dev\"",
+    "build": "tsc --noEmit && vite build",
+    "ai": "tsx server/cli.ts",
+    "mcp": "tsx server/mcp-server.ts"
+  },
+  "dependencies": {
+    "chokidar": "^3.6.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "three": "^0.170.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.9.0",
+    "@types/three": "^0.170.0",
+    "@types/ws": "^8.5.13",
+    "concurrently": "^9.1.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
